@@ -1,0 +1,3 @@
+<resources>
+    <string name="service_desc">Captura a tela e faz toques/segurar botões para automatizar o jogo (HP/MP, mover, atacar, coletar).</string>
+</resources>
