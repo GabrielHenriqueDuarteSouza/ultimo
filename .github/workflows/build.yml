@@ -1,0 +1,89 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      # Funciona de dois jeitos: (1) arquivos do projeto na raiz do repo
+      # ou (2) só o .zip do projeto na raiz (descompactado aqui).
+      - name: Localizar projeto
+        run: |
+          ZIP=$(ls *.zip 2>/dev/null | head -n1 || true)
+          if [ -n "$ZIP" ]; then
+            unzip -q -o "$ZIP" -d _proj
+            PROJ=$(dirname "$(find _proj -name settings.gradle.kts | head -n1)")
+          else
+            PROJ=.
+          fi
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+          echo "Projeto em: $PROJ"
+          ls -la "$PROJ"
+
+      # Usa o Android SDK que já vem no runner: escolhe a plataforma >= 34 que existir
+      # (instala a 34 só se não houver nenhuma) e aceita as licenças.
+      - name: Preparar Android SDK
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "SDK=$SDK"
+          echo "platforms:";   ls "$SDK/platforms" 2>/dev/null || echo "  (nenhuma)"
+          echo "build-tools:"; ls "$SDK/build-tools" 2>/dev/null || echo "  (nenhuma)"
+          SDKM=$(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -n1 || true)
+          sudo chmod -R a+rwX "$SDK" 2>/dev/null || true
+          if [ -n "$SDKM" ]; then yes | "$SDKM" --licenses > /dev/null 2>&1 || true; fi
+          pick_plat() { ls "$SDK/platforms" 2>/dev/null | sed -n 's/^android-\([0-9][0-9]*\)$/\1/p' | awk '$1>=34' | sort -n | head -n1 || true; }
+          PLAT=$(pick_plat)
+          if [ -z "$PLAT" ] && [ -n "$SDKM" ]; then
+            echo "Nenhuma plataforma >= 34; instalando android-34..."
+            "$SDKM" --install "platforms;android-34" "build-tools;34.0.0" || true
+            PLAT=$(pick_plat)
+          fi
+          BT=$(ls "$SDK/build-tools" 2>/dev/null | awk -F. '$1>=34' | sort -V | head -n1 || true)
+          PLAT=${PLAT:-34}
+          echo "Usando plataforma=$PLAT build-tools=${BT:-padrão}"
+          echo "GRADLE_ARGS=-PsdkPlatform=$PLAT${BT:+ -PsdkBuildTools=$BT}" >> "$GITHUB_ENV"
+
+      - name: Compilar APK (debug)
+        working-directory: ${{ env.PROJ }}
+        run: gradle assembleDebug --no-daemon --console=plain $GRADLE_ARGS 2>&1 | tee build.log
+
+      # Se algo falhar, a CAUSA aparece aqui, nas últimas linhas do log.
+      - name: Mostrar causa do erro
+        if: failure()
+        working-directory: ${{ env.PROJ }}
+        run: |
+          {
+            echo "## ❌ Causa do erro"
+            echo '```'
+            awk '/\* What went wrong:/{f=1} f{print} /\* Try:/{f=0}' build.log | head -40
+            grep -E '^e: |error:|Could not (resolve|find|install)|SDK|licen' build.log | head -30
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: AimoBot-resultado
+          path: |
+            ${{ env.PROJ }}/app/build/outputs/apk/debug/app-debug.apk
+            ${{ env.PROJ }}/build.log
+          if-no-files-found: warn
